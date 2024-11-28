@@ -1,0 +1,17 @@
+# Ignorer les fichiers de log
+*.log
+
+# Ignorer les fichiers temporaires
+*.tmp
+*.swp
+
+# Ignorer les fichiers de dépendances (par exemple, pour Node.js, Python, etc.)
+node_modules/
+venv/
+__pycache__/
+
+# Ignorer les fichiers de configuration de l'IDE (par exemple, Visual Studio Code)
+.vscode/
+
+# Ignorer les fichiers du système d'exploitation (exemple pour macOS)
+.DS_Store
