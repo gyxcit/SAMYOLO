@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Segmentation Tool</title>
+    <style>
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        /* Additional styles for the area table */
+        .area-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        .area-table th, .area-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+        .area-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }        
+        .controls {
+            margin-bottom: 20px;
+            position: sticky;
+            top: 0;
+            background: white;
+            z-index: 100;
+            padding: 10px 0;
+        }
+        
+        .button {
+            padding: 8px 16px;
+            margin-right: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .button.active {
+            background-color: #45a049;
+        }
+        
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .image-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .image-wrapper {
+            position: relative;
+            border: 1px solid #ddd;
+            padding: 10px;
+        }
+        
+        .canvas-wrapper {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            width: 100%;
+            height: 100%;
+        }
+        
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+        }
+        
+        .status.error {
+            background-color: #ffebee;
+            color: #c62828;
+            display: block;
+        }
+        
+        .status.success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            display: block;
+        }
+        .status.wait {
+            background-color: #fff3e0;
+            color: #f57c00;
+            display: block;
+        }
+        .top-right-buttons {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Voids and Components Classification</h1>
+        
+        <div class="controls">
+            <input type="file" id="fileInput" accept="image/*">
+            <button id="classifyButton" class="button" disabled>Classify</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div class="image-container">
+            <div class="image-wrapper">
+                <h2>Original Image</h2>
+                <div class="canvas-wrapper" id="canvasWrapper">
+                    <img id="image" src="" alt="Upload an image" draggable="false">
+                    <canvas id="overlayCanvas"></canvas>
+                </div>
+            </div>
+            <div class="image-wrapper">
+                <h2>Segmentation Prediction</h2>
+                <img id="classifiedImage" src="" alt="Classified image will appear here">
+            </div>
+        </div>
+
+        <table class="area-table" id="areaTable">
+            <caption><strong>Segmentation Area Table</strong></caption>
+            <thead>
+                <tr>
+                    <th>Image</th>
+                    <th>Component</th>
+                    <th>Area</th>
+                    <th>Void Area %</th>
+                    <th>Max Void Area %</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Rows will be dynamically added here using JavaScript -->
+            </tbody>
+        </table>
+        <button id="exportButton" class="button" disabled>Export to CSV</button>
+    </div>
+
+    <div class="top-right-buttons">
+        <a href="{{ url_for('index') }}" class="button">Go to SAM</a>
+        <button class="button" disabled>Go to Yolo</button>
+    </div>
+
+    <script>
+        class ClassificationTool {
+            constructor() {
+                this.initializeElements();
+                this.initializeState();
+                this.setupEventListeners();
+            }
+
+            initializeElements() {
+                this.fileInput = document.getElementById('fileInput');
+                this.image = document.getElementById('image');
+                this.overlayCanvas = document.getElementById('overlayCanvas');
+                this.overlayCtx = this.overlayCanvas.getContext('2d');
+                this.classifiedImage = document.getElementById('classifiedImage');
+                this.status = document.getElementById('status');
+                this.canvasWrapper = document.getElementById('canvasWrapper');
+                
+                this.buttons = {
+                    classify: document.getElementById('classifyButton'),
+                    export: document.getElementById('exportButton')
+                };
+            }
+
+            initializeState() {
+                this.currentMode = null;
+                this.uploadedFilename = '';
+            }
+
+            setupEventListeners() {
+                this.fileInput.addEventListener('change', (e) => this.handleFileUpload(e));
+                this.image.addEventListener('load', () => this.handleImageLoad());
+                this.buttons.classify.addEventListener('click', () => this.classify());
+                this.buttons.export.addEventListener('click', () => this.exportTableToCSV());
+                
+            }
+
+            setMode(mode) {
+                this.currentMode = this.currentMode === mode ? null : mode;
+                Object.values(this.buttons).forEach(button => button.classList.remove('active'));
+                if (this.currentMode) {
+                    this.buttons[this.currentMode].classList.add('active');
+                }
+                this.canvasWrapper.style.cursor = this.currentMode ? 'crosshair' : 'default';
+            }
+
+
+            updateAreaTable(areaData) {
+                const areaTableBody = document.getElementById('areaTable').getElementsByTagName('tbody')[0];
+                areaTableBody.innerHTML = ''; // Clear existing rows
+
+                areaData.forEach(item => {
+                    const row = areaTableBody.insertRow();
+                    
+                    const cellImage = row.insertCell(0);
+                    const cellComponent = row.insertCell(1);
+                    const cellArea = row.insertCell(2);
+                    const cellVoidArea = row.insertCell(3);
+                    const cellMaxVoidArea = row.insertCell(4);
+
+                    cellImage.textContent = item['Image'];
+                    cellComponent.textContent = item.Component;
+                    cellArea.textContent = item['Area'];
+                    cellVoidArea.textContent = item['Void Area %'].toFixed(2) + '%'; // Format as percentage
+                    cellMaxVoidArea.textContent = item['Max Void Area %'].toFixed(2) + '%'; // Format as percentage
+                });
+            }
+            async exportTableToCSV() {
+                const table = document.getElementById('areaTable');
+                let csvContent = '';
+                const rows = table.querySelectorAll('tr');
+
+                rows.forEach(row => {
+                    const cols = row.querySelectorAll('th, td');
+                    const rowData = Array.from(cols).map(col => col.textContent).join(',');
+                    csvContent += rowData + '\n';
+                });
+
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.setAttribute('download', 'report.csv');
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+            async handleFileUpload(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+
+                // Show "please wait" message
+                this.showStatus('Uploading the image, please wait...', 'wait');
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    const response = await fetch('/upload_yolo', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+                    if (result.error) throw new Error(result.error);
+
+                    this.image.src = result.image_url;
+                    this.uploadedFilename = result.filename;
+                    this.originalDimensions = result.dimensions;
+                    this.buttons.classify.disabled = false;
+
+                    // Show success message after upload is complete
+                    this.showStatus('Image uploaded successfully', 'success');
+                } catch (error) {
+                    this.showStatus(`Upload failed: ${error.message}`, 'error');
+                }
+            }
+
+            async classify() {
+                if (!this.uploadedFilename) {
+                    this.showStatus('Please upload an image first', 'error');
+                    return;
+                }
+
+                try {
+                    this.buttons.classify.disabled = true;
+                    
+                    const requestData = {
+                        filename: this.uploadedFilename
+                    };
+                    
+                    console.log('Sending data to backend:', requestData); // Debug logging
+
+                    const response = await fetch('/classify', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(requestData),
+                    });
+
+                    const result = await response.json();
+                    if (result.error) throw new Error(result.error);
+
+                    this.classifiedImage.src = result.result_path + '?t=' + new Date().getTime();
+                    this.showStatus('Classification completed successfully', 'success');
+
+                    // Check if area_data is defined and is an array before updating the table
+                    if (Array.isArray(result.area_data)) {
+                        this.updateAreaTable(result.area_data);
+                        this.buttons.export.disabled = false;
+                    } else {
+                        throw new Error('Area data is not available or is not an array.');
+                    }
+
+                } catch (error) {
+                    this.showStatus(`Failed to classify: ${error.message}`, 'error');
+                    console.error('Classification error:', error); // Debug logging
+                } finally {
+                    this.buttons.classify.disabled = false;
+                }
+            }
+            showStatus(message, type) {
+                this.status.className = `status ${type}`;
+                this.status.textContent = message;
+                this.status.style.display = 'block';
+                if (type === 'success' || type === 'error') {
+                    setTimeout(() => {
+                        this.status.style.display = 'none';
+                    }, 3000);
+                }
+            }
+        }
+
+        // Initialize the tool when the page loads
+        window.addEventListener('load', () => {
+            new ClassificationTool();
+        });
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Segmentation Tool</title>
+    <style>
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .controls {
+            margin-bottom: 20px;
+            position: sticky;
+            top: 0;
+            background: white;
+            z-index: 100;
+            padding: 10px 0;
+        }
+        
+        .button {
+            padding: 8px 16px;
+            margin-right: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .button.active {
+            background-color: #45a049;
+        }
+        
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .image-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .image-wrapper {
+            position: relative;
+            border: 1px solid #ddd;
+            padding: 10px;
+        }
+        
+        .canvas-wrapper {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            width: 100%;
+            height: 100%;
+        }
+        
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .status {
+            margin-top: 10px;
+            padding: 20px; /* Increased padding for larger size */
+            border-radius: 8px; /* More rounded corners */
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            width: 300px; /* Define a width for consistency */
+            font-size: 1.2em; /* Larger font size */
+            background-color: #333; /* Dark background for visibility */
+            color: #fff; /* White text color for contrast */
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3); /* Shadow effect for emphasis */
+            text-align: center; /* Center-align the text */
+        }  
+
+        
+        .status.error {
+            background-color: #ffebee;
+            color: #c62828;
+            display: block;
+        }
+        
+        .status.success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            display: block;
+        }
+        .status.wait {
+            background-color: #fff3e0;
+            color: #f57c00;
+            display: block;
+        }
+        .top-right-buttons {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Image Annotation Tool</h1>
+        
+        <div class="controls">
+            <input type="file" id="fileInput" accept="image/*">
+            <button id="voidButton" class="button">Mark Voids</button>
+            <button id="componentButton" class="button">Draw Components</button>
+            <button id="clearButton"  class="button" disabled>Clear All</button>
+            <button id="generateMaskButton" class="button" disabled>Generate Mask</button>
+            <button id="retrainButton" class="button" disabled>Retrain Model</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div class="image-container">
+            <div class="image-wrapper">
+                <h2>Original Image</h2>
+                <div class="canvas-wrapper" id="canvasWrapper">
+                    <img id="image" src="" alt="Upload an image" draggable="false">
+                    <canvas id="overlayCanvas"></canvas>
+                </div>
+            </div>
+            <div class="image-wrapper">
+                <h2>Segmented Result</h2>
+                <img id="segmentedImage" src="" alt="Segmented image will appear here">
+            </div>
+        </div>
+    </div>
+
+    <div class="top-right-buttons">
+        <button class="button" disabled>Go to SAM</button>
+        <a href="{{ url_for('yolo') }}" class="button">Go to Yolo</a>
+    </div>
+
+    <script>
+        class SegmentationTool {
+            constructor() {
+                this.initializeElements();
+                this.initializeState();
+                this.setupEventListeners();
+            }
+
+            initializeElements() {
+                this.fileInput = document.getElementById('fileInput');
+                this.image = document.getElementById('image');
+                this.overlayCanvas = document.getElementById('overlayCanvas');
+                this.overlayCtx = this.overlayCanvas.getContext('2d');
+                this.segmentedImage = document.getElementById('segmentedImage');
+                this.status = document.getElementById('status');
+                this.canvasWrapper = document.getElementById('canvasWrapper');
+                
+                this.buttons = {
+                    void: document.getElementById('voidButton'),
+                    component: document.getElementById('componentButton'),
+                    clear: document.getElementById('clearButton'),
+                    generate: document.getElementById('generateMaskButton'),
+                    retrain: document.getElementById('retrainButton')
+                };
+            }
+
+            initializeState() {
+                this.normalizedVoidPoints = [];
+                this.normalizedComponentBoxes = [];
+                this.currentMode = null;
+                this.hoverStart = null;
+                this.uploadedFilename = '';
+                this.isDrawing = false;
+                this.tempBox = null; // Store the current box being drawn
+            }
+
+            setupEventListeners() {
+                this.fileInput.addEventListener('change', (e) => this.handleFileUpload(e));
+                this.image.addEventListener('load', () => this.handleImageLoad());
+                this.buttons.void.addEventListener('click', () => this.setMode('void'));
+                this.buttons.component.addEventListener('click', () => this.setMode('component'));
+                this.buttons.clear.addEventListener('click', () => this.clearAll());
+                this.buttons.generate.addEventListener('click', () => this.generateMask());
+                this.buttons.retrain.addEventListener('click', () => this.retrainModel());
+                
+                this.canvasWrapper.addEventListener('click', (e) => this.handleImageClick(e));
+                this.canvasWrapper.addEventListener('mousedown', (e) => this.handleMouseDown(e));
+                this.canvasWrapper.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+                this.canvasWrapper.addEventListener('mouseup', (e) => this.handleMouseUp(e));
+                
+                // Add ResizeObserver
+                const resizeObserver = new ResizeObserver(() => {
+                    this.updateCanvasSize();
+                    this.redrawAllPoints();
+                });
+                
+                resizeObserver.observe(this.canvasWrapper);
+            }
+
+            getImageCoordinates(event) {
+                const rect = this.image.getBoundingClientRect();
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
+                
+                return {
+                    display: [x, y],
+                    normalized: [x / rect.width, y / rect.height]
+                };
+            }
+
+            updateCanvasSize() {
+                const rect = this.image.getBoundingClientRect();
+                this.overlayCanvas.style.width = `${rect.width}px`;
+                this.overlayCanvas.style.height = `${rect.height}px`;
+                this.overlayCanvas.width = rect.width;
+                this.overlayCanvas.height = rect.height;
+            }
+
+            handleImageLoad() {
+                this.updateCanvasSize();
+                this.redrawAllPoints();
+            }
+
+            setMode(mode) {
+                this.currentMode = this.currentMode === mode ? null : mode;
+                Object.values(this.buttons).forEach(button => button.classList.remove('active'));
+                if (this.currentMode) {
+                    this.buttons[this.currentMode].classList.add('active');
+                }
+                this.canvasWrapper.style.cursor = this.currentMode ? 'crosshair' : 'default';
+            }
+
+            handleImageClick(event) {
+                if (this.currentMode !== 'void') return;
+
+                const coords = this.getImageCoordinates(event);
+                this.normalizedVoidPoints.push(coords.normalized);
+                this.drawVoidPoint(coords.display);
+            }
+
+            handleMouseDown(event) {
+                if (this.currentMode !== 'component') return;
+                event.preventDefault();
+                this.isDrawing = true;
+                const coords = this.getImageCoordinates(event);
+                this.hoverStart = coords; // Start point of the box
+                this.tempBox = null; // Reset temporary box
+            }
+
+            handleMouseMove(event) {
+                if (!this.isDrawing || this.currentMode !== 'component') return;
+
+                const coords = this.getImageCoordinates(event);
+                this.clearOverlay();
+                this.redrawAllPoints();
+
+                // Draw the temporary box
+                if (this.hoverStart) {
+                    this.tempBox = {
+                        start: this.hoverStart.display,
+                        end: coords.display
+                    };
+                    this.drawComponentBox(this.tempBox.start, this.tempBox.end);
+                }
+            }
+
+            handleMouseUp(event) {
+                if (this.currentMode !== 'component' || !this.isDrawing) return;
+
+                const coords = this.getImageCoordinates(event);
+                
+                // Calculate normalized coordinates for the box
+                const normalizedBox = [
+                    Math.min(this.hoverStart.normalized[0], coords.normalized[0]),
+                    Math.min(this.hoverStart.normalized[1], coords.normalized[1]),
+                    Math.max(this.hoverStart.normalized[0], coords.normalized[0]),
+                    Math.max(this.hoverStart.normalized[1], coords.normalized[1])
+                ];
+                
+                // Ensure box size is valid
+                const minSize = 0.01; // 1% of image size
+                if (Math.abs(normalizedBox[2] - normalizedBox[0]) > minSize && 
+                    Math.abs(normalizedBox[3] - normalizedBox[1]) > minSize) {
+                    this.normalizedComponentBoxes.push(normalizedBox);
+                    console.log('Added box:', normalizedBox); // Debug logging
+                }
+
+                // Reset drawing state
+                this.isDrawing = false;
+                this.hoverStart = null;
+                this.tempBox = null; // Clear temp box
+                this.redrawAllPoints(); // Redraw all points and boxes
+            }
+
+
+            normalizedToDisplay(point) {
+                const rect = this.image.getBoundingClientRect();
+                return [
+                    point[0] * rect.width,
+                    point[1] * rect.height
+                ];
+            }
+
+            normalizedToDisplayBox(box) {
+                const rect = this.image.getBoundingClientRect();
+                return [
+                    box[0] * rect.width,
+                    box[1] * rect.height,
+                    box[2] * rect.width,
+                    box[3] * rect.height
+                ];
+            }
+
+            drawVoidPoint([x, y]) {
+                this.overlayCtx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                this.overlayCtx.beginPath();
+                this.overlayCtx.arc(x, y, 5, 0, Math.PI * 2);
+                this.overlayCtx.fill();
+            }
+
+            drawComponentBox([startX, startY], [endX, endY]) {
+                // Draw the box outline
+                this.overlayCtx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
+                this.overlayCtx.lineWidth = 2;
+                this.overlayCtx.strokeRect(
+                    startX,
+                    startY,
+                    endX - startX,
+                    endY - startY
+                );
+                
+                // Add semi-transparent fill
+                this.overlayCtx.fillStyle = 'rgba(0, 255, 0, 0.1)';
+                this.overlayCtx.fillRect(
+                    startX,
+                    startY,
+                    endX - startX,
+                    endY - startY
+                );
+            }
+
+            clearOverlay() {
+                this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+            }
+
+            redrawAllPoints() {
+                this.clearOverlay();
+                
+                // Draw all void points
+                this.normalizedVoidPoints.forEach(point => {
+                    const displayPoint = this.normalizedToDisplay(point);
+                    this.drawVoidPoint(displayPoint);
+                });
+                
+                // Draw all component boxes
+                this.normalizedComponentBoxes.forEach(box => {
+                    const displayBox = this.normalizedToDisplayBox(box);
+                    this.drawComponentBox(
+                        [displayBox[0], displayBox[1]],
+                        [displayBox[2], displayBox[3]]
+                    );
+                });
+                
+                // Draw the temporary box if it exists
+                if (this.tempBox) {
+                    this.drawComponentBox(this.tempBox.start, this.tempBox.end);
+                }
+            }
+
+            clearAll() {
+                // Reset only the data points and visual elements
+                this.normalizedVoidPoints = [];
+                this.normalizedComponentBoxes = [];
+                this.clearOverlay();
+                this.currentMode = null;
+                this.hoverStart = null;
+                this.isDrawing = false;
+                this.tempBox = null;
+                
+                // Reset button states
+                Object.values(this.buttons).forEach(button => button.classList.remove('active'));
+                this.canvasWrapper.style.cursor = 'default';
+                
+                // Clear the segmented image
+                this.segmentedImage.src = '';
+                
+                // Make sure the generate button is still enabled if we have an image
+                this.buttons.generate.disabled = !this.uploadedFilename;
+                this.buttons.clear.disabled = true;
+                
+                // Redraw the canvas to ensure it's clear
+                this.redrawAllPoints();
+                
+                this.showStatus('All markings cleared', 'success');
+            }
+            async handleFileUpload(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                this.clearAll();
+
+                // Show "please wait" message
+                this.showStatus('Uploading and embedding image, please wait...', 'wait');
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    const response = await fetch('/upload_sam', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+                    if (result.error) throw new Error(result.error);
+
+                    this.image.src = result.image_url;
+                    this.uploadedFilename = result.filename;
+                    this.originalDimensions = result.dimensions;
+                    this.buttons.generate.disabled = false;
+
+
+                    // Show success message after upload is complete
+                    this.showStatus('Image uploaded successfully', 'success');
+                } catch (error) {
+                    this.showStatus(`Upload failed: ${error.message}`, 'error');
+                }
+            }
+
+            async generateMask() {
+                if (!this.uploadedFilename) {
+                    this.showStatus('Please upload an image first', 'error');
+                    return;
+                }
+
+                try {
+                    this.buttons.generate.disabled = true;
+                    
+                    const requestData = {
+                        void_points: this.normalizedVoidPoints,
+                        component_boxes: this.normalizedComponentBoxes,
+                        filename: this.uploadedFilename,
+                        original_dimensions: this.originalDimensions
+                    };
+                    
+                    console.log('Sending data to backend:', requestData); // Debug logging
+
+                    const response = await fetch('/generate_mask', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(requestData),
+                    });
+
+                    const result = await response.json();
+                    if (result.error) throw new Error(result.error);
+
+                    this.segmentedImage.src = result.result_path + '?t=' + new Date().getTime();
+                    this.showStatus('Mask generated successfully', 'success');
+                } catch (error) {
+                    this.showStatus(`Failed to generate mask: ${error.message}`, 'error');
+                    console.error('Mask generation error:', error); // Debug logging
+                } finally {
+                    this.buttons.generate.disabled = false;
+                    this.buttons.retrain.disabled = false;
+                    this.buttons.clear.style.backgroundColor = '#c62828';
+                    this.buttons.clear.disabled = false;
+                }
+            }
+            async retrainModel() {
+                try {
+                    this.buttons.retrain.disabled = true;
+                    this.showStatus('Starting model retraining...', 'wait');
+
+                    // First make the POST request to start the training
+                    const response = await fetch('/start_retraining', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to start retraining');
+                    }
+
+                    // If POST was successful, open the monitoring page in a new window
+                    window.open('/start_retraining', '_blank');
+
+                    // Connect to Socket.IO to receive updates in the main window
+                    const socket = io();
+
+                    socket.on('training_update', (data) => {
+                        this.showStatus(`Retraining progress: ${data.status}`, 'wait');
+                    });
+
+                    socket.on('training_complete', (data) => {
+                        this.showStatus('Model retraining completed successfully!', 'success');
+                        this.buttons.retrain.disabled = false;
+                        socket.disconnect();
+                    });
+
+                    socket.on('training_error', (data) => {
+                        this.showStatus(data.status, 'error');
+                        this.buttons.retrain.disabled = false;
+                        socket.disconnect();
+                    });
+
+                    socket.on('connect_error', (error) => {
+                        this.showStatus('Connection error: ' + error, 'error');
+                        this.buttons.retrain.disabled = false;
+                        socket.disconnect();
+                    });
+
+                } catch (error) {
+                    this.showStatus(`Failed to start retraining: ${error.message}`, 'error');
+                    this.buttons.retrain.disabled = false;
+                }
+            }
+            
+            showStatus(message, type) {
+                this.status.className = `status ${type}`;
+                this.status.textContent = message;
+                this.status.style.display = 'block';
+                if (type === 'success' || type === 'error') {
+                    setTimeout(() => {
+                        this.status.style.display = 'none';
+                    }, 6000);
+                }
+            }
+        }
+
+        // Initialize the tool when the page loads
+        window.addEventListener('load', () => {
+            new SegmentationTool();
+        });
+
+    </script>
+</body>
+</html>
