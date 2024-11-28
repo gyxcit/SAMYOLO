@@ -9,7 +9,7 @@ SAM2 is a powerful image and video segmentation framework developed by Meta Plat
 - Real-time updates through WebSocket for training progress
 
 ## Deployment
-You can test the final app using the following link: https://ibrahimathioye-sam-yolo-flask.hf.space/ 
+You can test the final app using the following link:
 
 ## Requirements
 - Python 3.11 +
